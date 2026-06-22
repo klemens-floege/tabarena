@@ -32,6 +32,12 @@ class TabPFN3Model(AbstractTorchModel):
     popped from the hyperparameters in :meth:`_fit` (it is not a tabpfn estimator argument).
     """
 
+    hyperparameters_param_name: str = "hyperparameters_per_problem_type"
+    """Optional config param: per-problem-type tabpfn kwarg overrides, keyed like
+    :attr:`checkpoint_param_name`. Lets one checkpoint serve problem types whose tabpfn kwargs
+    diverge (the classifier/regressor would reject the other's). Popped in :meth:`_fit`.
+    """
+
     _categorical_indices: list[int] | None
     """The indices of the categorical features, detected during preprocessing."""
     fixed_random_state: int = 0
@@ -82,6 +88,17 @@ class TabPFN3Model(AbstractTorchModel):
 
         return prepend_cache_path(self._resolve_checkpoint_for_problem_type(checkpoint_per_problem_type))
 
+    def _resolve_hyperparameters_for_problem_type(
+        self, hyperparameters_per_problem_type: dict[str, dict] | None
+    ) -> dict:
+        """Per-problem-type kwarg overrides, resolved like :meth:`_resolve_checkpoint_for_problem_type`."""
+        is_classification = self.problem_type in ["binary", "multiclass"]
+        overrides = hyperparameters_per_problem_type or {}
+        hps = overrides.get(self.problem_type)
+        if hps is None and is_classification:
+            hps = overrides.get("classification")
+        return dict(hps) if hps else {}
+
     def _fit(
         self,
         X: pd.DataFrame,
@@ -95,6 +112,7 @@ class TabPFN3Model(AbstractTorchModel):
         # Set hyperparameters
         hps = dict(self._get_model_params())
         checkpoint_per_problem_type = hps.pop(self.checkpoint_param_name, None)
+        hyperparameters_per_problem_type = hps.pop(self.hyperparameters_param_name, None)
         default_hps = dict(
             model_path=self._get_model_checkpoint(checkpoint_per_problem_type),
             device=self._resolve_tabpfn_device(num_gpus=num_gpus),
@@ -102,7 +120,11 @@ class TabPFN3Model(AbstractTorchModel):
             categorical_features_indices=self._categorical_indices,
         )
         default_hps[self.seed_name] = self.fixed_random_state
-        hps = {**default_hps, **hps}  # hps later to override any conflicting keys default keys.
+        # Per-problem-type kwargs win last, over defaults and shared hps.
+        per_problem_type_hps = self._resolve_hyperparameters_for_problem_type(
+            hyperparameters_per_problem_type
+        )
+        hps = {**default_hps, **hps, **per_problem_type_hps}
 
         # Initialize and fit the model
         model_class = self._get_model_class()
